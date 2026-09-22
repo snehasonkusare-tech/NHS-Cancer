@@ -5,10 +5,17 @@
 const API_URL = import.meta.env.VITE_API_URL as string | undefined;
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 
+/** False when VITE_API_URL/VITE_API_KEY are missing, so every call short-circuits to the
+ *  scripted flow. Surfaced in the UI: an unconfigured build otherwise looks like a working
+ *  one that simply has nothing useful to say. */
+export const apiConfigured = Boolean(API_URL && API_KEY);
+
 export interface SlmReply {
   answer: string;
   /** Set when the backend's emergency/crisis screen fired: 'crisis', 'chest', 'abdomen', ... */
   safety: string | null;
+  /** 'out' when the question isn't about the patient's health, so it never reached the model. */
+  scope: string | null;
 }
 
 async function post(body: Record<string, unknown>, timeoutMs: number): Promise<SlmReply | null> {
@@ -24,7 +31,7 @@ async function post(body: Record<string, unknown>, timeoutMs: number): Promise<S
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return { answer: String(data.answer ?? ''), safety: data.safety ?? null };
+    return { answer: String(data.answer ?? ''), safety: data.safety ?? null, scope: data.scope ?? null };
   } catch {
     return null;
   } finally {

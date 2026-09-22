@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import logoImage from './imports/logo.png';
 import logoMark from './imports/logo-mark.png'
-import { screenMessage, askSlm, lookupPatient, getPreparation, type PrepItem } from './slmApi';
+import { screenMessage, askSlm, lookupPatient, getPreparation, apiConfigured, type PrepItem } from './slmApi';
 import { startListening, speak, stopSpeaking, voiceInputSupported, readAloudSupported, VOICE_LANGUAGES, type VoiceSession, type VoiceError } from './voice';
 import { loadSettings, saveSettings, DEFAULT_SETTINGS, TEXT_ZOOM, type Settings, type TextSize } from './settings';
 
@@ -20,6 +20,10 @@ type Screen =
 
 // How many model-driven follow-up questions to ask before moving on to the summary.
 const MAX_MODEL_QUESTIONS = 3;
+
+// Offered alongside the symptom categories when the guidance service can't be reached, so the
+// patient is never forced to pick a category that has nothing to do with their symptoms.
+const NONE_OF_THESE = 'None of these describe it';
 
 type ChatPhase = 'initial' | 'clarify' | 'q0' | 'q1' | 'q2' | 'done' | 'noMatch';
 
@@ -1372,13 +1376,14 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
       }
 
       addUserMsg(text);
-      setUserInput(allUserText);
       setPhase('clarify');
       const withUser = [...convo, { role: 'user' as const, content: text }];
-      convoRef.current = withUser;
       const userTurns = withUser.filter(m => m.role === 'user').length;
+      // Only recorded once we know it's a symptom: an off-topic message must not reach the summary.
+      const keepTurn = () => { setUserInput(allUserText); convoRef.current = withUser; };
 
       if (userTurns > MAX_MODEL_QUESTIONS) {
+        keepTurn();
         // Enough facts gathered: wrap up and move on to the summary/review flow.
         setPhase('done');
         addBotMsg("Thank you — that gives me a clear enough picture. I'll put together a summary of what you've told me and check it against NHS NG12 guidance.");
@@ -1402,16 +1407,23 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
       setBotTyping(true);
       const reply = await askSlm(user.nhsNumber, text, convo);
       setBotTyping(false);
-      if (reply?.answer) {
+      if (reply?.scope === 'out') {
+        // Not about their health. Say what OncoWay is for and leave the intake exactly where it was.
+        setPhase(currentPhase);
+        addBotMsg(reply.answer);
+      } else if (reply?.answer) {
+        keepTurn();
         convoRef.current = [...withUser, { role: 'assistant' as const, content: reply.answer }];
         addBotMsg(reply.answer);
       } else if (userTurns === 1) {
+        keepTurn();
         addBotMsg("Thank you for sharing that. Can you say a little more about what you've noticed physically? For example, where exactly, and when did you first notice it?");
       } else {
+        keepTurn();
         setPhase('noMatch');
         addBotMsg(
-          "I wasn't able to match your description to a specific NG12 symptom pattern. That doesn't mean there's nothing to look into — it may be worth speaking to your GP.\n\nDo any of these symptom categories feel closer to what you're experiencing?",
-          SYMPTOM_CATEGORIES.slice(0, 5).map(c => c.label)
+          "I'm having trouble checking your description against NG12 guidance just now, so I can't say whether it matches a referral pattern.\n\nIf one of these is closer to what you're experiencing, choose it and I'll ask about that instead — otherwise choose the last option and I'll pass on what you've already told me.",
+          [...SYMPTOM_CATEGORIES.slice(0, 5).map(c => c.label), NONE_OF_THESE]
         );
       }
     }
@@ -1438,6 +1450,23 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
     addUserMsg(option);
 
     if (currentPhase === 'noMatch') {
+      if (option === NONE_OF_THESE) {
+        setPhase('done');
+        addBotMsg("That's fine — I'll summarise what you've told me in your own words and check it against NHS NG12 guidance.");
+        const finalMessages = [...messages, { id: genId(), role: 'user' as const, text: option, time: nowTime() }];
+        setTimeout(async () => {
+          const plan = await getPreparation(user.nhsNumber, currentUserInput);
+          onComplete({
+            category: plan?.outcome === 'safetynet' ? null : buildGeneralCategory(currentUserInput),
+            userInput: currentUserInput,
+            answers: convoRef.current.filter(m => m.role === 'user').slice(1).map(m => m.content),
+            matchedNG12: false,
+            messages: finalMessages,
+            submittedToGP: false,
+          });
+        }, 2400);
+        return;
+      }
       const matched = SYMPTOM_CATEGORIES.find(c => c.label === option);
       if (matched) {
         setCategory(matched);
@@ -1498,7 +1527,14 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
                 <path d="M12 21s-7-4.35-9.5-8.5C1 9 2.5 5.5 6 5c2-.3 3.7.7 6 3 2.3-2.3 4-3.3 6-3 3.5.5 5 4 3.5 7.5C19 16.65 12 21 12 21z"/>
               </svg>
             </div>
-            <p className="text-white/60 text-[11px] mt-1">Symptom checker</p>
+            <p className="text-white/60 text-[11px] mt-1">
+              Symptom checker
+              {!apiConfigured && (
+                <span className="ml-2 rounded-full bg-amber-400/20 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+                  Offline demo — NG12 service not connected
+                </span>
+              )}
+            </p>
           </div>
         </div>
       </div>

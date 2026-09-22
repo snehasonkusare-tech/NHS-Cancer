@@ -8,6 +8,7 @@ import json, os, re, time, urllib.request
 import boto3
 import safety
 import prep
+import scope
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
@@ -20,6 +21,7 @@ OS_INDEX = os.environ.get("OPENSEARCH_INDEX", "nhs-ng12-kb")
 SAGEMAKER_ENDPOINT = os.environ.get("SAGEMAKER_ENDPOINT", "")
 BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "")
 TOP_K = int(os.environ.get("TOP_K", "5"))
+INTAKE_TOKENS = int(os.environ.get("INTAKE_TOKENS", "256"))
 
 rds = boto3.client("rds-data", region_name=REGION)
 bedrock = boto3.client("bedrock-runtime", region_name=REGION)
@@ -29,6 +31,10 @@ SYSTEM = ("You are an NHS cancer-care onboarding assistant. Use only the informa
           "Never diagnose. If unsure, say so and refer the patient to their GP or care team. "
           "Only quote guidance that appears below and never invent tests, preparation steps or arrangements. "
           "Emergency advice (999, 111) is handled elsewhere, so do not cite NG12 for emergencies. "
+          "You are OncoWay and you only help with symptoms, the patient's referral and their cancer care. "
+          "If they ask about anything else (weather, sport, cooking, code, general knowledge, or what model you are), "
+          "do not answer it: say you are OncoWay, that the question is outside what you help with, and invite them "
+          "to describe any symptom they are worried about. "
           "Speak to the patient in plain, calm language, and keep replies short.")
 
 
@@ -182,10 +188,10 @@ def build_messages(patient, chunks, question, mode="answer", history=None):
     return [{"role": "system", "content": system}] + turns + [{"role": "user", "content": question}]
 
 
-def call_model(messages):
+def call_model(messages, max_new_tokens=512):
     if SAGEMAKER_ENDPOINT:  # fine-tuned Qwen3 endpoint: chat `messages` in, {"response": "..."} out
         r = smr.invoke_endpoint(EndpointName=SAGEMAKER_ENDPOINT, ContentType="application/json",
-                                Body=json.dumps({"messages": messages, "max_new_tokens": 512}))
+                                Body=json.dumps({"messages": messages, "max_new_tokens": max_new_tokens}))
         out = json.loads(r["Body"].read())
         if isinstance(out, list):
             out = out[0]
@@ -264,6 +270,9 @@ def lambda_handler(event, context):
             return _resp(200, {"patient_id": patient_id, "answer": hit[1], "safety": hit[0], "sources": []})
         if body.get("safety_only"):  # fast screen used by the app before its own flow; no database/model
             return _resp(200, {"safety": None, "answer": ""})
+        off = scope.check(question)
+        if off:  # not about their health: say what OncoWay is for instead of letting the model answer it
+            return _resp(200, {"patient_id": patient_id, "answer": off, "scope": "out", "sources": []})
         if not question or not (patient_id or body.get("nhs_number")):
             return _resp(400, {"error": "question and patient_id (or nhs_number) are required"})
         patient_id = resolve_patient_id(patient_id, str(body.get("nhs_number", "")))
@@ -275,8 +284,11 @@ def lambda_handler(event, context):
         history = clean_history(body.get("history"))
         chunks = retrieve_symptom_chunks(search_query(record, question + " " + " ".join(t["content"] for t in history if t["role"] == "user")))
         mode = "intake" if body.get("mode") == "intake" else "answer"
-        answer = call_model(build_messages(record, chunks, question, mode, history))
-        answer = guard_reply(answer, history, lambda: call_model(build_messages(record, chunks, question, mode, history)))
+        # One short follow-up question needs far fewer tokens than a full answer, and generation
+        # time is what pushes slow requests towards the 29s API Gateway limit.
+        cap = INTAKE_TOKENS if mode == "intake" else 512
+        ask = lambda: call_model(build_messages(record, chunks, question, mode, history), cap)
+        answer = guard_reply(ask(), history, ask)
         return _resp(200, {"patient_id": patient_id, "answer": answer, "sources": [f"{c['sheet']}:{c['row_id']}" for c in chunks]})
     except Exception as e:  # keep patient data out of error responses
         print("error:", repr(e))
