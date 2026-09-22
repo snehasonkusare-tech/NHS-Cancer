@@ -1,0 +1,69 @@
+# Deploys the chat Lambda whenever its source changes on main.
+#
+# Authentication is GitHub OIDC: the job exchanges its short-lived workflow token for AWS
+# credentials at runtime, so no secret is stored in this repository. The role's trust policy
+# only accepts workflows running on main in this repo, which matters because the repo is
+# public — a fork or a pull request cannot assume it. See infra/scripts/setup-github-oidc.sh.
+#
+# The frontend is deployed separately by Amplify's own GitHub connection (amplify.yml).
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/lambda/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required to request the OIDC token
+  contents: read
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  FUNCTION_NAME: SlmDataStack-ChatFunction3D7C447E-zW5FTPBQNbv9
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the Lambda sources compile
+        run: python3 -m py_compile infra/lambda/*.py
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::489597129436:role/GitHubActionsOncoWayDeploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package
+        run: cd infra/lambda && zip -q "$RUNNER_TEMP/fn.zip" handler.py safety.py prep.py scope.py
+
+      - name: Deploy
+        run: |
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file "fileb://$RUNNER_TEMP/fn.zip" \
+            --region "$AWS_REGION" >/dev/null
+          aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$AWS_REGION"
+          echo "deployed at $(aws lambda get-function-configuration --function-name "$FUNCTION_NAME" \
+            --region "$AWS_REGION" --query LastModified --output text)"
+
+      - name: Smoke test — an off-topic question must not reach the model
+        run: |
+          aws lambda invoke --function-name "$FUNCTION_NAME" --region "$AWS_REGION" \
+            --cli-binary-format raw-in-base64-out \
+            --payload '{"body":"{\"nhs_number\":\"9471183390\",\"mode\":\"intake\",\"question\":\"what is the weather\"}"}' \
+            /tmp/out.json >/dev/null
+          python3 -c "
+          import json
+          body = json.loads(json.load(open('/tmp/out.json'))['body'])
+          assert body.get('scope') == 'out', f'expected scope=out, got {body}'
+          print('smoke test passed:', body['answer'][:60])
+          "
