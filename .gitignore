@@ -20,3 +20,5 @@ logs/
 /.plugins/
 /.opencode-skills/
 NHS-Cancer/
+__pycache__/
+*.pyc

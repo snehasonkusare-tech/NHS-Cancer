@@ -1,0 +1,22 @@
+# Amplify build spec — used when the GitHub repo is connected for auto-deploy on push.
+# Vite 8 needs Node 20+, and Amplify's default image may be older, so pin it explicitly.
+# VITE_API_URL and VITE_API_KEY come from the app's environment variables (set in Amplify,
+# not from .env.local, which is git-ignored and never reaches the build server).
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - nvm install 22
+        - nvm use 22
+        - npm ci
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    baseDirectory: dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
