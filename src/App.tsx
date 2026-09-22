@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import logoImage from './imports/logo.png';
 import logoMark from './imports/logo-mark.png'
-import { screenMessage, askSlm, lookupPatient, getPreparation, apiConfigured, type PrepItem } from './slmApi';
+import { screenMessage, askSlm, lookupPatient, registerPatient, getPreparation, apiConfigured, type PrepItem } from './slmApi';
 import { startListening, speak, stopSpeaking, voiceInputSupported, readAloudSupported, VOICE_LANGUAGES, type VoiceSession, type VoiceError } from './voice';
 import { loadSettings, saveSettings, DEFAULT_SETTINGS, TEXT_ZOOM, type Settings, type TextSize } from './settings';
 
@@ -572,35 +572,6 @@ function StepIndicator({
 }
 
 
-// ─── Status Bar ───────────────────────────────────────────────────────────────
-
-function StatusBar({ dark = false }: { dark?: boolean }) {
-  const color = dark ? 'text-white' : 'text-[#371A82]';
-  return (
-    <div className={`flex justify-between items-center px-6 pt-3 pb-1 text-[11px] font-semibold ${color}`}>
-      <span>9:41</span>
-      <div className="flex gap-1.5 items-center">
-        <svg width="16" height="10" viewBox="0 0 16 10" fill="currentColor">
-          <rect x="0" y="5" width="3" height="5" rx="0.5" opacity="0.4"/>
-          <rect x="4" y="3" width="3" height="7" rx="0.5" opacity="0.6"/>
-          <rect x="8" y="1" width="3" height="9" rx="0.5" opacity="0.8"/>
-          <rect x="12" y="0" width="3" height="10" rx="0.5"/>
-        </svg>
-        <svg width="16" height="12" viewBox="0 0 16 12" fill="currentColor">
-          <path d="M8 2.5C10.5 2.5 12.7 3.6 14.2 5.3L15.5 4C13.6 1.9 11 0.5 8 0.5C5 0.5 2.4 1.9 0.5 4L1.8 5.3C3.3 3.6 5.5 2.5 8 2.5Z" opacity="0.4"/>
-          <path d="M8 5.5C9.8 5.5 11.4 6.3 12.5 7.5L13.8 6.2C12.3 4.7 10.3 3.8 8 3.8C5.7 3.8 3.7 4.7 2.2 6.2L3.5 7.5C4.6 6.3 6.2 5.5 8 5.5Z" opacity="0.7"/>
-          <circle cx="8" cy="10" r="1.5"/>
-        </svg>
-        <svg width="25" height="12" viewBox="0 0 25 12" fill="currentColor">
-          <rect x="0" y="1" width="21" height="10" rx="2" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.5"/>
-          <rect x="1.5" y="2.5" width="16" height="7" rx="1"/>
-          <rect x="22" y="4" width="2.5" height="4" rx="1" opacity="0.5"/>
-        </svg>
-      </div>
-    </div>
-  );
-}
-
 // ─── Welcome Screen ───────────────────────────────────────────────────────────
 
 function SplashScreen({ onDone }: { onDone: () => void }) {
@@ -721,7 +692,7 @@ function LoginScreen({ onLogin, onBack }: { onLogin: (u: User) => void; onBack: 
       fullName: result.fullName,
       nhsNumber: nhs,
       dob,
-      postcode: 'SE1 7PB',
+      postcode: result.postcode ?? 'SE1 7PB',
       gpPractice: result.gpPractice,
       consent: true,
     });
@@ -815,16 +786,28 @@ function LoginScreen({ onLogin, onBack }: { onLogin: (u: User) => void; onBack: 
 function RegisterScreen({ onRegister, onBack }: { onRegister: (u: User) => void; onBack: () => void }) {
   const [form, setForm] = useState({ fullName: '', nhsNumber: '', dob: '', postcode: '', gpPractice: '', consent: false });
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const set = (k: keyof typeof form, v: string | boolean) => setForm(f => ({ ...f, [k]: v }));
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.fullName || !form.nhsNumber || !form.dob || !form.postcode || !form.gpPractice) {
       setError('Please fill in all fields.'); return;
     }
     if (!form.consent) { setError('Please review and accept the consent statement to continue.'); return; }
-    onRegister({ ...form, consent: true });
+    setError('');
+    setSaving(true);
+    const result = await registerPatient({ ...form, consent: true });
+    setSaving(false);
+    if (result.status === 'duplicate') {
+      setError('That NHS number is already registered. Please log in instead.'); return;
+    }
+    if (result.status === 'invalid') { setError(result.message); return; }
+    if (result.status === 'error') {
+      setError("We couldn't reach the service just now. Please try again in a moment."); return;
+    }
+    onRegister({ ...form, gpPractice: result.gpPractice, consent: true });
   };
 
   return (
@@ -883,8 +866,8 @@ function RegisterScreen({ onRegister, onBack }: { onRegister: (u: User) => void;
 
           {error && <p className="text-[#B3261E] text-xs font-medium">{error}</p>}
 
-          <button type="submit" className="w-full bg-[#371A82] text-white py-4 rounded-xl font-semibold text-sm mt-2 hover:bg-[#2A1560] active:scale-[0.98] transition-all">
-            Create account
+          <button type="submit" disabled={saving} className="w-full bg-[#371A82] text-white py-4 rounded-xl font-semibold text-sm mt-2 hover:bg-[#2A1560] active:scale-[0.98] transition-all disabled:opacity-60">
+            {saving ? 'Creating your account…' : 'Create account'}
           </button>
         </form>
       </div>
@@ -907,13 +890,11 @@ function HomeScreen({
         <div className="absolute -bottom-10 -right-6 w-32 h-32 rounded-full bg-white/5" />
         <div className="absolute bottom-4 right-16 w-16 h-16 rounded-full bg-white/5" />
         <div className="flex items-center justify-between px-5 pb-7 pt-2 relative">
-          <div className="flex items-center gap-2">
-            <h2 style={{ fontFamily: "'Baloo 2', 'Inter', system-ui, sans-serif" }} className="text-white text-2xl font-bold">
-              Hi, {firstName(user.fullName)}
-            </h2>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="#C4B5F5" stroke="none">
-              <path d="M12 21s-7-4.35-9.5-8.5C1 9 2.5 5.5 6 5c2-.3 3.7.7 6 3 2.3-2.3 4-3.3 6-3 3.5.5 5 4 3.5 7.5C19 16.65 12 21 12 21z"/>
-            </svg>
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center shrink-0 overflow-hidden">
+              <img src={logoMark} alt="" className="w-6 h-6 object-contain" />
+            </div>
+            <p style={{ fontFamily: "'Baloo 2', 'Inter', system-ui, sans-serif" }} className="text-white text-xl font-bold leading-none">OncoWay</p>
           </div>
           <button onClick={() => setShowMenu(true)} className="w-10 h-10 rounded-full bg-white/15 flex items-center justify-center hover:bg-white/25 transition-all shrink-0" aria-label="Open menu">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -935,7 +916,20 @@ function HomeScreen({
         </svg>
       </div>
 
-      <div className="px-5 py-5 flex flex-col gap-4 relative z-10">
+      <div className="px-5 py-5 flex-1 flex flex-col justify-center gap-4 relative z-10">
+        {/* The greeting sits with the cards in the centred group, filling what was dead space. */}
+        <div className="text-center mb-2">
+          <div className="flex items-center justify-center gap-2">
+            <h2 style={{ fontFamily: "'Baloo 2', 'Inter', system-ui, sans-serif" }} className="text-[#371A82] text-3xl font-bold">
+              Hi, {firstName(user.fullName)}
+            </h2>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="#8058DF" stroke="none">
+              <path d="M12 21s-7-4.35-9.5-8.5C1 9 2.5 5.5 6 5c2-.3 3.7.7 6 3 2.3-2.3 4-3.3 6-3 3.5.5 5 4 3.5 7.5C19 16.65 12 21 12 21z"/>
+            </svg>
+          </div>
+          <p className="text-gray-500 text-sm mt-1.5">How are you feeling today?</p>
+        </div>
+
         <button
           onClick={onNewChat}
           className="w-full bg-gradient-to-br from-[#371A82] to-[#6B48C7] rounded-2xl p-5 flex items-center gap-4 shadow-lg shadow-[#371A82]/20 hover:opacity-95 active:scale-[0.98] transition-all text-left relative overflow-hidden"
@@ -3061,7 +3055,9 @@ export default function App() {
       case 'register':
         return <RegisterScreen onRegister={handleRegister} onBack={() => go('welcome')} />;
       case 'home':
-        return user ? <HomeScreen user={user} history={chatHistory} onNewChat={() => go('chat')} onProfile={() => go('profile')} onHistory={() => go('chatHistory')} onSettings={() => go('settings')} onLogout={handleLogout} /> : null;
+        // "Start a new chat" must always begin fresh: without clearing the session here, a
+        // finished conversation is still in state and ChatScreen restores it as initialSession.
+        return user ? <HomeScreen user={user} history={chatHistory} onNewChat={() => { setSession(null); setMaxStepReached(0); go('chat'); }} onProfile={() => go('profile')} onHistory={() => go('chatHistory')} onSettings={() => go('settings')} onLogout={handleLogout} /> : null;
       case 'settings':
         return user ? (
           <SettingsScreen
@@ -3139,11 +3135,6 @@ export default function App() {
       style={{ zoom: TEXT_ZOOM[settings.textSize] }}
     >
       <style>{"@import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&display=swap');"}</style>
-      {screen !== 'splash' && (
-        <div className={screen === 'emergency' ? 'bg-[#B3261E]' : 'bg-[#371A82]'}>
-          <StatusBar dark />
-        </div>
-      )}
       {showStep && (screen === 'review' || screen === 'nextSteps') && <StepIndicator screen={screen} maxReached={maxStepReached} onNavigate={handleStepNav} />}
       <div className="flex-1 min-h-0 flex flex-col">
         {renderScreen()}

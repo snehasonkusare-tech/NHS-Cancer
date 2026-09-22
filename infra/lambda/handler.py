@@ -52,13 +52,45 @@ def _query(sql, patient_id, **extra):
 
 
 def login_lookup(nhs_number, dob):
-    """NHS number + date of birth must both match. Returns only what the app needs to greet the person."""
+    """NHS number + date of birth must both match. Returns only what the app needs to greet the person.
+    Checks the seeded test patients first, then accounts registered through the app."""
     digits = "".join(ch for ch in nhs_number if ch.isdigit())
     if len(digits) != 10 or not dob:
         return None
-    rows = _query("SELECT full_name_synthetic, gp_practice FROM test_patients "
+    rows = _query("SELECT full_name_synthetic AS full_name, gp_practice FROM test_patients "
                   "WHERE replace(nhs_number_synthetic, ' ', '') = :pid AND date_of_birth = :dob", digits, dob=dob.strip())
-    return {"full_name": rows[0]["full_name_synthetic"], "gp_practice": rows[0]["gp_practice"]} if rows else None
+    if not rows:
+        rows = _query("SELECT full_name, gp_practice, postcode FROM app_users "
+                      "WHERE nhs_number = :pid AND date_of_birth = :dob", digits, dob=dob.strip())
+    if not rows:
+        return None
+    out = {"full_name": rows[0]["full_name"], "gp_practice": rows[0].get("gp_practice") or ""}
+    if rows[0].get("postcode"):
+        out["postcode"] = rows[0]["postcode"]
+    return out
+
+
+def register_user(body):
+    """Create an account so the person can log back in later. Returns (payload, http_status)."""
+    name = str(body.get("full_name", "")).strip()[:120]
+    digits = "".join(ch for ch in str(body.get("nhs_number", "")) if ch.isdigit())
+    dob = str(body.get("dob", "")).strip()[:10]
+    postcode = str(body.get("postcode", "")).strip()[:10]
+    gp = str(body.get("gp_practice", "")).strip()[:120]
+    if not name or not dob or not gp:
+        return {"error": "full_name, dob and gp_practice are required"}, 400
+    if len(digits) != 10:
+        return {"error": "NHS number must be 10 digits"}, 400
+    # An NHS number identifies one person, so it can only belong to one account.
+    if _query("SELECT 1 AS x FROM test_patients WHERE replace(nhs_number_synthetic, ' ', '') = :pid", digits) or \
+       _query("SELECT 1 AS x FROM app_users WHERE nhs_number = :pid", digits):
+        return {"error": "that NHS number is already registered"}, 409
+    pid = f"AU-{digits}"
+    _query("INSERT INTO app_users (patient_id, full_name, nhs_number, date_of_birth, postcode, gp_practice, consent) "
+           "VALUES (:pid, :name, :pid2, :dob, :postcode, :gp, :consent)", pid,
+           name=name, pid2=digits, dob=dob, postcode=postcode, gp=gp,
+           consent="yes" if body.get("consent") else "no")
+    return {"full_name": name, "gp_practice": gp, "patient_id": pid}, 200
 
 
 def resolve_patient_id(patient_id, nhs_number):
@@ -69,6 +101,8 @@ def resolve_patient_id(patient_id, nhs_number):
     if len(digits) != 10:
         return ""
     rows = _query("SELECT patient_id FROM test_patients WHERE replace(nhs_number_synthetic, ' ', '') = :pid", digits)
+    if not rows:
+        rows = _query("SELECT patient_id FROM app_users WHERE nhs_number = :pid", digits)
     return rows[0]["patient_id"] if rows else ""
 
 
@@ -78,7 +112,14 @@ def get_patient_record(patient_id):
                   "communication_preferences, gp_practice, presenting_symptom, suspected_site, suspected_pathway, specialty "
                   "FROM test_patients WHERE patient_id = :pid", patient_id)
     if not rows:
-        return {}
+        # Registered through the app: no seeded clinical record, so build a minimal profile.
+        app = _query("SELECT patient_id, full_name AS full_name_synthetic, gp_practice FROM app_users "
+                     "WHERE patient_id = :pid", patient_id)
+        if not app:
+            return {}
+        record = app[0]
+        record["history"], record["consult"] = {}, {}
+        return record
     record = rows[0]
     hist = _query("SELECT medications, allergies, past_medical_history_conditions, family_history, last_gp_encounter "
                   "FROM ehr_emr_patient_history WHERE patient_id = :pid", patient_id)
@@ -120,12 +161,26 @@ def retrieve_symptom_chunks(question):
     return [h["_source"] for h in res["hits"]["hits"]]
 
 
-RULES = ("Use the BACKGROUND to tailor your questions and advice: age (NG12 thresholds depend on it), sex, family history, "
-         "medications and allergies, and the patient's language, accessibility and communication needs. "
-         "Only talk about the EXISTING REFERRAL if the patient asks about their referral or appointment; never assume a new symptom is "
-         "related to it. If the patient states their own age or details, trust what they say over the record. "
-         "Respond to what they just said. Unless they have already given the detail, ask ONE short follow-up question about the symptom "
-         "(for example how long, where, or any other symptoms). You cannot book appointments or arrange anything, so never offer to. Never reveal the record itself or say you can see it; just use it naturally.")
+RULES = (
+    # Silently personalise from the record.
+    "Use the BACKGROUND to choose your questions: age (NG12 thresholds depend on it), sex, family history, "
+    "medications, allergies, and their language, accessibility and communication needs. "
+    # The record is not the conversation. Attributing it to the patient is the worst failure here:
+    # it invents symptoms they never reported and destroys their trust in the summary.
+    "ONLY the patient's own messages in this conversation count as things they have told you. The BACKGROUND and "
+    "EXISTING REFERRAL are records, never something they said. Never write 'the other symptoms you told me about', "
+    "never mention a symptom they have not typed themselves, and never suggest a new symptom is connected to an "
+    "existing referral. Discuss the EXISTING REFERRAL only if they ask about their referral or appointment. "
+    "If the patient states their own age or details, trust them over the record. "
+    # Each reply must earn its turn: there are only a few before the summary.
+    "Your reply must BE the question. Never announce that you are about to ask questions, never say you would like "
+    "to ask a few things, and never ask permission: ask the single most useful question straight away. "
+    "Ask about ONE thing only - not how long AND where, just whichever matters most for NG12. "
+    # These are patients, often frightened ones.
+    "Write in plain everyday English. Never use clinical words such as 'saddle numbness', 'haematuria', 'dysphagia' "
+    "or 'lymphadenopathy'; describe what you mean in ordinary words instead. Keep it to one or two short sentences. "
+    "You cannot book appointments or arrange anything, so never offer to. "
+    "Never reveal the record or say you can see it.")
 
 
 def _first(v, default="not on file"):
@@ -261,6 +316,9 @@ def lambda_handler(event, context):
                 return _resp(200, {"outcome": "safetynet", "items": []})
             # Weak matches would suggest unrelated tests, so show none; the app then shows its general GP-review guidance.
             return _resp(200, {"outcome": "refer", "items": prep.build_items(rows, prep_lookup) if best >= WEAK_MATCH else []})
+        if body.get("mode") == "register":
+            payload, status = register_user(body)
+            return _resp(status, payload)
         if body.get("mode") == "login":
             found = login_lookup(str(body.get("nhs_number", "")), str(body.get("dob", "")))
             return _resp(200, found) if found else _resp(404, {"error": "no matching patient"})

@@ -56,9 +56,49 @@ export async function askSlm(
 }
 
 export type LoginResult =
-  | { status: 'found'; fullName: string; gpPractice: string }
+  | { status: 'found'; fullName: string; gpPractice: string; postcode?: string }
   | { status: 'notFound' }
   | { status: 'error' };
+
+export type RegisterResult =
+  | { status: 'created'; fullName: string; gpPractice: string }
+  /** The NHS number already belongs to an account, so they should log in instead. */
+  | { status: 'duplicate' }
+  | { status: 'invalid'; message: string }
+  | { status: 'error' };
+
+/** Creates an account in the patient database so the person can log back in later. */
+export async function registerPatient(u: {
+  fullName: string; nhsNumber: string; dob: string; postcode: string; gpPractice: string; consent: boolean;
+}): Promise<RegisterResult> {
+  if (!API_URL || !API_KEY) return { status: 'error' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({
+        mode: 'register',
+        full_name: u.fullName, nhs_number: u.nhsNumber, dob: u.dob,
+        postcode: u.postcode, gp_practice: u.gpPractice, consent: u.consent,
+      }),
+      signal: ctrl.signal,
+    });
+    if (res.status === 409) return { status: 'duplicate' };
+    if (res.status === 400) {
+      const d = await res.json().catch(() => ({}));
+      return { status: 'invalid', message: String(d.error ?? 'Please check the details you entered.') };
+    }
+    if (!res.ok) return { status: 'error' };
+    const data = await res.json();
+    return { status: 'created', fullName: String(data.full_name), gpPractice: String(data.gp_practice) };
+  } catch {
+    return { status: 'error' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Checks NHS number + date of birth (yyyy-mm-dd) against the patient database. */
 export async function lookupPatient(nhsNumber: string, dob: string): Promise<LoginResult> {
@@ -75,7 +115,12 @@ export async function lookupPatient(nhsNumber: string, dob: string): Promise<Log
     if (res.status === 404) return { status: 'notFound' };
     if (!res.ok) return { status: 'error' };
     const data = await res.json();
-    return { status: 'found', fullName: String(data.full_name), gpPractice: String(data.gp_practice) };
+    return {
+      status: 'found',
+      fullName: String(data.full_name),
+      gpPractice: String(data.gp_practice),
+      ...(data.postcode ? { postcode: String(data.postcode) } : {}),
+    };
   } catch {
     return { status: 'error' };
   } finally {
