@@ -1,0 +1,7 @@
+{
+  "name": "slm-data-layer",
+  "private": true,
+  "scripts": { "build": "tsc", "synth": "cdk synth", "deploy": "cdk deploy", "diff": "cdk diff" },
+  "dependencies": { "aws-cdk-lib": "latest", "constructs": "^10.4.2" },
+  "devDependencies": { "@types/node": "^22.0.0", "aws-cdk": "latest", "ts-node": "^10.9.2", "typescript": "~5.7.0" }
+}

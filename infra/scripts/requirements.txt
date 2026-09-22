@@ -1,0 +1,4 @@
+boto3
+openpyxl
+opensearch-py
+requests-aws4auth

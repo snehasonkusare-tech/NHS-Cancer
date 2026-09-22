@@ -1,0 +1,10 @@
+{
+  "description": "This chatbot app assists patients in describing symptoms, evaluates them against NHS guidelines, and optionally shares summaries with GPs for better healthcare management.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

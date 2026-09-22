@@ -1,0 +1,12 @@
+{
+  "SlmDataStack": {
+    "DbClusterArn": "arn:aws:rds:eu-west-2:489597129436:cluster:slmdatastack-patientdb2d0da4c7-abnkdsqpgwrk",
+    "ChatApiEndpoint467C6B40": "https://ierkgv24od.execute-api.eu-west-2.amazonaws.com/prod/",
+    "DataBucketName": "slmdatastack-databuckete3889a50-sq2fszkhophr",
+    "DbSecretArn": "arn:aws:secretsmanager:eu-west-2:489597129436:secret:SlmDataStackPatientDbSecret-EYEE8TyceKCK-Rtaczy",
+    "OpenSearchEndpoint": "search-knowledgebaseb1-7ystphwvjnen-qejky7ut5piutjopvvbqv6nrfi.eu-west-2.es.amazonaws.com",
+    "ChatApiKeyId": "nbj3m3kr7f",
+    "DbName": "nhs_slm",
+    "ChatApiUrl": "https://ierkgv24od.execute-api.eu-west-2.amazonaws.com/prod/chat"
+  }
+}
