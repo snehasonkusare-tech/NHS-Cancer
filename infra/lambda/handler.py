@@ -9,6 +9,7 @@ import boto3
 import safety
 import prep
 import scope
+import questions
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
@@ -165,6 +166,12 @@ RULES = (
     # Silently personalise from the record.
     "Use the BACKGROUND to choose your questions: age (NG12 thresholds depend on it), sex, family history, "
     "medications, allergies, and their language, accessibility and communication needs. "
+    # The record already holds these facts; asking for them again wastes a turn and looks careless.
+    "NEVER ask for anything the BACKGROUND already tells you - you know their age, sex, medications, allergies, "
+    "past conditions and family history, so ask about the symptom instead. "
+    # Family history and past conditions change which NG12 criterion applies and how urgent it is.
+    "When the BACKGROUND shows a family history of cancer, or a past condition that bears on this symptom, let it "
+    "steer which question you ask next and treat the symptom with the extra weight that history deserves. "
     # The record is not the conversation. Attributing it to the patient is the worst failure here:
     # it invents symptoms they never reported and destroys their trust in the summary.
     "ONLY the patient's own messages in this conversation count as things they have told you. The BACKGROUND and "
@@ -175,7 +182,11 @@ RULES = (
     # Each reply must earn its turn: there are only a few before the summary.
     "Your reply must BE the question. Never announce that you are about to ask questions, never say you would like "
     "to ask a few things, and never ask permission: ask the single most useful question straight away. "
-    "Ask about ONE thing only - not how long AND where, just whichever matters most for NG12. "
+    # A patient who asks something and gets a question back feels unheard.
+    "The one exception: if the patient asks you a question, answer it first in one short sentence, then ask yours. "
+    "Ask about ONE thing only. Do not chain symptoms together with 'or': asking about breathlessness, chest pain, "
+    "weight loss and appetite in one breath is four questions and will confuse them. Pick the single symptom that "
+    "most changes what happens next under NG12, and ask only about that. "
     # These are patients, often frightened ones.
     "Write in plain everyday English. Never use clinical words such as 'saddle numbness', 'haematuria', 'dysphagia' "
     "or 'lymphadenopathy'; describe what you mean in ordinary words instead. Keep it to one or two short sentences. "
@@ -209,6 +220,18 @@ def nice_rows_for(text, age=None, sex=None, k=25, keep=3, closeness=0.93):
         return [], 0.0
     best = rows[0][0]
     return [r for sc, r in rows if sc >= best * closeness][:keep], best
+
+
+def bank_row_for(text):
+    """(row, score) for the Guided_Question_Bank entry closest to the patient's own words."""
+    emb = json.loads(bedrock.invoke_model(modelId="amazon.titan-embed-text-v2:0", body=json.dumps(
+        {"inputText": text[:2000], "dimensions": 1024, "normalize": True}))["body"].read())["embedding"]
+    hits = _search({"size": 1, "_source": ["text"], "query": {"knn": {"embedding": {
+        "vector": emb, "k": 1, "filter": {"term": {"sheet": questions.SHEET}}}}}})
+    if not hits:
+        return None, 0.0
+    score, src = hits[0]
+    return prep.parse_row(src["text"]), score
 
 
 def prep_lookup(name):
@@ -342,6 +365,23 @@ def lambda_handler(event, context):
         history = clean_history(body.get("history"))
         chunks = retrieve_symptom_chunks(search_query(record, question + " " + " ".join(t["content"] for t in history if t["role"] == "user")))
         mode = "intake" if body.get("mode") == "intake" else "answer"
+        # A patient asking us something needs an answer, not another question, so those go to the model.
+        if mode == "intake" and "?" not in question:
+            said = " ".join([t["content"] for t in history if t["role"] == "user"] + [question])
+            row, score = bank_row_for(said)
+            if row and score >= questions.MATCH_FLOOR:
+                age = int(record["age"]) if str(record.get("age", "")).isdigit() else None
+                nxt = questions.next_question(row, age, history, said)
+                src = [f"{questions.SHEET}:{row.get('Presenting Symptom', '')}"]
+                if nxt:
+                    return _resp(200, {"patient_id": patient_id, "answer": questions.lead_in(history) + nxt,
+                                       "bank": row.get("Presenting Symptom", ""), "sources": src})
+                # The vetted set is exhausted. Letting the model improvise another question here produced
+                # weak and sometimes falsely reassuring replies, so go straight to the summary instead.
+                if any(t["role"] == "assistant" for t in history):
+                    return _resp(200, {"patient_id": patient_id, "done": True, "bank": row.get("Presenting Symptom", ""),
+                                       "answer": "Thank you — that gives me a clear enough picture. Let me put together "
+                                                 "a summary and check it against NHS NG12 guidance.", "sources": src})
         # One short follow-up question needs far fewer tokens than a full answer, and generation
         # time is what pushes slow requests towards the 29s API Gateway limit.
         cap = INTAKE_TOKENS if mode == "intake" else 512

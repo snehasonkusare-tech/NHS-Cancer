@@ -16,6 +16,8 @@ export interface SlmReply {
   safety: string | null;
   /** 'out' when the question isn't about the patient's health, so it never reached the model. */
   scope: string | null;
+  /** True when the guided question set is exhausted and the intake should move to the summary. */
+  done: boolean;
 }
 
 async function post(body: Record<string, unknown>, timeoutMs: number): Promise<SlmReply | null> {
@@ -31,7 +33,7 @@ async function post(body: Record<string, unknown>, timeoutMs: number): Promise<S
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return { answer: String(data.answer ?? ''), safety: data.safety ?? null, scope: data.scope ?? null };
+    return { answer: String(data.answer ?? ''), safety: data.safety ?? null, scope: data.scope ?? null, done: !!data.done };
   } catch {
     return null;
   } finally {

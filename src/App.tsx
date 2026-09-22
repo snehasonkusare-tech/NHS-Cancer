@@ -1405,6 +1405,23 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
         // Not about their health. Say what OncoWay is for and leave the intake exactly where it was.
         setPhase(currentPhase);
         addBotMsg(reply.answer);
+      } else if (reply?.done) {
+        // The guided question set is exhausted, so there is nothing useful left to ask.
+        keepTurn();
+        setPhase('done');
+        addBotMsg(reply.answer);
+        const finalMessages = [...messages, { id: genId(), role: 'user' as const, text, time: nowTime() }];
+        setTimeout(async () => {
+          const plan = await getPreparation(user.nhsNumber, allUserText);
+          onComplete({
+            category: plan?.outcome === 'safetynet' ? null : buildGeneralCategory(allUserText),
+            userInput: allUserText,
+            answers: withUser.filter(m => m.role === 'user').slice(1).map(m => m.content),
+            matchedNG12: false,
+            messages: finalMessages,
+            submittedToGP: false,
+          });
+        }, 2400);
       } else if (reply?.answer) {
         keepTurn();
         convoRef.current = [...withUser, { role: 'assistant' as const, content: reply.answer }];
