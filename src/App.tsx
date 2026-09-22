@@ -25,6 +25,13 @@ const MAX_MODEL_QUESTIONS = 3;
 // patient is never forced to pick a category that has nothing to do with their symptoms.
 const NONE_OF_THESE = 'None of these describe it';
 
+// Offered alongside every set of fixed answers. The options can never cover how someone
+// actually experiences a symptom, and forcing a near-enough choice puts words in their mouth
+// that then travel into the GP summary.
+const SOMETHING_ELSE = 'Something else — let me explain';
+
+const withSomethingElse = (options: string[]) => [...options, SOMETHING_ELSE];
+
 type ChatPhase = 'initial' | 'clarify' | 'q0' | 'q1' | 'q2' | 'done' | 'noMatch';
 
 interface User {
@@ -1240,6 +1247,8 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
   const [category, setCategory] = useState<SymptomCategory | null>(initialSession?.category ?? null);
   const [userInput, setUserInput] = useState(initialSession?.userInput ?? '');
   const [answers, setAnswers] = useState<string[]>(initialSession?.answers ?? []);
+  /** Set when the patient picks 'Something else', so they can type instead of choosing. */
+  const [freeText, setFreeText] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const phaseRef = useRef<ChatPhase>('initial');
@@ -1365,7 +1374,7 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
         setTimeout(() => addBotMsg(
           `Thank you. I've recognised this relates to "${matched.label}" — a symptom category covered by NHS NG12 guidance.\n\nI'll ask a few short questions to build a clearer picture. Please use the options below.`,
         ), 300);
-        setTimeout(() => addBotMsg(matched.followUpQuestions[0].question, matched.followUpQuestions[0].options), 1700);
+        setTimeout(() => addBotMsg(matched.followUpQuestions[0].question, withSomethingElse(matched.followUpQuestions[0].options)), 1700);
         return;
       }
 
@@ -1447,7 +1456,14 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
     const text = inputText.trim();
     if (!text || botTyping) return;
     setInputText('');
-    processInput(text);
+    // A typed reply to a fixed-answer question is recorded as that question's answer, so the
+    // patient's own wording carries through to the summary instead of a chosen label.
+    if (freeText && ['q0', 'q1', 'q2'].includes(phaseRef.current)) {
+      setFreeText(false);
+      handleQuickReply(text);
+    } else {
+      processInput(text);
+    }
     inputRef.current?.focus();
   };
 
@@ -1482,8 +1498,15 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
       if (matched) {
         setCategory(matched);
         setPhase('q0');
-        setTimeout(() => addBotMsg(matched.followUpQuestions[0].question, matched.followUpQuestions[0].options), 700);
+        setTimeout(() => addBotMsg(matched.followUpQuestions[0].question, withSomethingElse(matched.followUpQuestions[0].options)), 700);
       }
+      return;
+    }
+
+    if (option === SOMETHING_ELSE) {
+      // Hand the turn back to the patient rather than recording a fixed answer.
+      setFreeText(true);
+      setTimeout(() => addBotMsg('Of course — please describe it in your own words.'), 500);
       return;
     }
 
@@ -1510,12 +1533,13 @@ function ChatScreen({ user, settings, onEmergency, onComplete, onBack, initialSe
       setPhase(nextPhase as ChatPhase);
       setTimeout(() => addBotMsg(
         currentCategory.followUpQuestions[qIndex + 1].question,
-        currentCategory.followUpQuestions[qIndex + 1].options
+        withSomethingElse(currentCategory.followUpQuestions[qIndex + 1].options)
       ), 700);
     }
   };
 
-  const isInputPhase = phase === 'initial' || phase === 'clarify';
+  // 'Something else' unlocks the text box on a question that otherwise only takes fixed answers.
+  const isInputPhase = phase === 'initial' || phase === 'clarify' || freeText;
   const lastMsg = messages[messages.length - 1];
   const showQuickReplies = lastMsg?.role === 'bot' && lastMsg.quickReplies && !botTyping;
   // A restored session is already finished — this is what lets you go forward
